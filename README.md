@@ -1,40 +1,85 @@
-# VideoSage Transcript Service
+# YouTube Transcript Service
 
 A FastAPI service that fetches and formats YouTube video transcripts.
 
-## Local Development
+## Features
 
-1. Install dependencies:
+- Fetch transcripts from YouTube videos
+- Support for multiple languages and translations
+- Multiple output formats (Text, WebVTT, SRT, JSON)
+- Proxy support to avoid IP blocking
+
+## Setup
+
+1. Clone the repository
+2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Run the service:
+3. Set up environment variables:
+   - Copy `.env.example` to `.env`
+   - Add your Webshare proxy credentials:
+     ```
+     WEBSHARE_PROXY_USERNAME=your_username_here
+     WEBSHARE_PROXY_PASSWORD=your_password_here
+     ```
+   - (Optional) Set custom port:
+     ```
+     PORT=8001
+     ```
+
+## Running the Service
 
 ```bash
 python main.py
 ```
 
-The service will be available at `http://localhost:8001`.
+The service will start on port 8001 by default.
 
 ## API Endpoints
 
-- `GET /`: Health check endpoint
-- `GET /transcript/{video_id}`: Get transcript for a YouTube video
-  - Optional query parameter: `language` (e.g., 'en', 'es', 'fr')
+### Get Transcript
 
-## Deployment
+```
+GET /transcript/{video_id}
+```
 
-This service can be deployed to Render.com:
+Query parameters:
 
-1. Create a new account on Render.com
-2. Connect your GitHub repository
-3. Create a new Web Service
-4. Use the following settings:
-   - Build Command: `pip install -r requirements.txt`
-   - Start Command: `python main.py`
-   - Environment Variables:
-     - `PORT`: 8001
+- `language`: Language code (e.g., 'en', 'es', 'de')
+- `format`: Output format ('text', 'vtt', 'srt', 'json')
+- `preserve_formatting`: Boolean to preserve HTML formatting
 
-The service will be automatically deployed when you push changes to your repository.
+### List Available Languages
+
+```
+GET /languages/{video_id}
+```
+
+Returns available transcripts and translation options for a video.
+
+## Proxy Configuration
+
+This service uses Webshare proxy to avoid IP blocking by YouTube. To use it:
+
+1. Sign up for a Webshare proxy account at https://www.webshare.io/
+2. Get your proxy credentials
+3. Add them to your `.env` file
+
+If no proxy credentials are provided, the service will attempt to make direct requests (may be blocked by YouTube).
+
+## Error Handling
+
+The service handles various error cases:
+
+- Video unavailable
+- No transcripts available
+- Language not available
+- IP blocking
+- Network errors
+
+## Development
+
+Contributions are welcome! Please feel free to submit a Pull Request.

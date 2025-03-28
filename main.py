@@ -1,10 +1,16 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig
 from youtube_transcript_api.formatters import TextFormatter, WebVTTFormatter, SRTFormatter, JSONFormatter
 from typing import Optional, Literal
 import os
 from dotenv import load_dotenv
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -19,6 +25,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def get_youtube_api():
+    """Initialize YouTube Transcript API with proxy configuration."""
+    proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
+    proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
+    
+    if not proxy_username or not proxy_password:
+        logger.warning("Webshare proxy credentials not found in environment variables")
+        return YouTubeTranscriptApi()
+    
+    logger.debug("Initializing YouTube API with Webshare proxy")
+    proxy_config = WebshareProxyConfig(
+        proxy_username=proxy_username,
+        proxy_password=proxy_password,
+    )
+    return YouTubeTranscriptApi(proxy_config=proxy_config)
+
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "YouTube Transcript Service"}
@@ -31,34 +53,43 @@ async def get_transcript(
     preserve_formatting: bool = False
 ):
     try:
-        # Initialize the API
-        ytt_api = YouTubeTranscriptApi()
+        logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
+        
+        # Initialize the API with proxy
+        ytt = get_youtube_api()
         
         try:
             # First try to fetch with the requested language
             if language:
-                transcript = ytt_api.fetch(video_id, languages=[language], preserve_formatting=preserve_formatting)
+                logger.debug(f"Attempting to fetch transcript in {language}")
+                transcript = ytt.get_transcript(video_id, languages=[language])
             else:
-                transcript = ytt_api.fetch(video_id, languages=['en'], preserve_formatting=preserve_formatting)
+                logger.debug("Attempting to fetch transcript in English")
+                transcript = ytt.get_transcript(video_id, languages=['en'])
         except Exception as e:
+            logger.debug(f"Initial fetch attempt failed: {str(e)}")
             if language:
                 # If specific language fails, try English
                 try:
-                    transcript = ytt_api.fetch(video_id, languages=['en'], preserve_formatting=preserve_formatting)
+                    logger.debug("Falling back to English")
+                    transcript = ytt.get_transcript(video_id, languages=['en'])
                     # Try to translate if needed
                     if language != 'en':
-                        transcript = ytt_api.translate_transcript(transcript, language)
-                except:
+                        logger.debug(f"Attempting to translate to {language}")
+                        translations = ytt.list_transcripts(video_id)
+                        en_transcript = translations.find_transcript(['en'])
+                        transcript = en_transcript.translate(language).fetch()
+                except Exception as e2:
+                    logger.debug(f"English fallback failed: {str(e2)}")
                     # If English fails, try any available language
-                    transcript = ytt_api.fetch(video_id, preserve_formatting=preserve_formatting)
-                    if language != transcript.language_code:
-                        try:
-                            transcript = ytt_api.translate_transcript(transcript, language)
-                        except:
-                            pass  # Keep original if translation fails
+                    logger.debug("Trying any available language")
+                    transcript = ytt.get_transcript(video_id)
             else:
                 # If no specific language was requested, try any available language
-                transcript = ytt_api.fetch(video_id, preserve_formatting=preserve_formatting)
+                logger.debug("No language specified, trying any available")
+                transcript = ytt.get_transcript(video_id)
+
+        logger.debug(f"Successfully fetched transcript with {len(transcript)} segments")
 
         # Format the transcript according to the requested format
         if format:
@@ -73,22 +104,21 @@ async def get_transcript(
                 formatter = JSONFormatter()
             
             if formatter:
+                logger.debug(f"Formatting transcript as {format}")
                 formatted_text = formatter.format_transcript(transcript)
                 return {
                     "text": formatted_text,
                     "source": "youtube_transcript_api",
-                    "language": transcript.language,
-                    "language_code": transcript.language_code,
-                    "is_generated": transcript.is_generated,
-                    "video_id": video_id,
-                    "format": format
+                    "format": format,
+                    "video_id": video_id
                 }
         
         # Default formatting with timestamps
+        logger.debug("Using default timestamp formatting")
         formatted_transcript = ""
-        for snippet in transcript.snippets:
-            start = float(snippet.start)
-            text = snippet.text.strip()
+        for entry in transcript:
+            start = float(entry['start'])
+            text = entry['text'].strip()
             
             minutes = int(start // 60)
             seconds = int(start % 60)
@@ -98,15 +128,12 @@ async def get_transcript(
         return {
             "text": formatted_transcript.strip(),
             "source": "youtube_transcript_api",
-            "language": transcript.language,
-            "language_code": transcript.language_code,
-            "is_generated": transcript.is_generated,
             "video_id": video_id
         }
         
     except Exception as e:
         error_message = str(e)
-        print(f"Error fetching transcript: {error_message}")  # Debug logging
+        logger.error(f"Error fetching transcript: {error_message}")
         
         if "Subtitles are disabled" in error_message:
             status_code = 404
@@ -117,9 +144,12 @@ async def get_transcript(
         elif "Video unavailable" in error_message:
             status_code = 404
             detail = "The video is unavailable or does not exist."
+        elif "YouTube is blocking requests from your IP" in error_message:
+            status_code = 503
+            detail = "Service temporarily unavailable. Please try again later."
         else:
             status_code = 500
-            detail = "An error occurred while fetching the transcript"
+            detail = f"An error occurred while fetching the transcript: {error_message}"
             
         raise HTTPException(
             status_code=status_code,
@@ -129,8 +159,9 @@ async def get_transcript(
 @app.get("/languages/{video_id}")
 async def list_languages(video_id: str):
     try:
-        ytt_api = YouTubeTranscriptApi()
-        transcript_list = ytt_api.list(video_id)
+        logger.debug(f"Listing languages for video {video_id}")
+        ytt = get_youtube_api()
+        transcript_list = ytt.list_transcripts(video_id)
         
         available_transcripts = []
         for transcript in transcript_list:
@@ -142,6 +173,7 @@ async def list_languages(video_id: str):
                 "translation_languages": transcript.translation_languages
             })
         
+        logger.debug(f"Found {len(available_transcripts)} available transcripts")
         return {
             "video_id": video_id,
             "available_transcripts": available_transcripts
@@ -149,14 +181,17 @@ async def list_languages(video_id: str):
         
     except Exception as e:
         error_message = str(e)
-        print(f"Error listing languages: {error_message}")  # Debug logging
+        logger.error(f"Error listing languages: {error_message}")
         
         if "Video unavailable" in error_message:
             status_code = 404
             detail = "The video is unavailable or does not exist."
+        elif "YouTube is blocking requests from your IP" in error_message:
+            status_code = 503
+            detail = "Service temporarily unavailable. Please try again later."
         else:
             status_code = 500
-            detail = "An error occurred while fetching available languages"
+            detail = f"An error occurred while fetching available languages: {error_message}"
             
         raise HTTPException(
             status_code=status_code,

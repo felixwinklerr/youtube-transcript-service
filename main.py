@@ -40,9 +40,7 @@ def configure_proxy() -> Optional[WebshareProxyConfig]:
     logger.debug("Initializing Webshare proxy configuration")
     return WebshareProxyConfig(
         proxy_username=username,
-        proxy_password=password,
-        proxy_host="proxy.webshare.io",
-        proxy_port="80"
+        proxy_password=password
     )
 
 @app.get("/")

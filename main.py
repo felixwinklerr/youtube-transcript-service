@@ -10,6 +10,7 @@ import os
 from dotenv import load_dotenv
 import logging
 import requests
+from requests.auth import HTTPProxyAuth
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -28,8 +29,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_proxy_config() -> Optional[dict]:
-    """Initialize proxy configuration with Webshare credentials."""
+def get_proxy_session() -> Optional[requests.Session]:
+    """Initialize a requests session with proxy configuration."""
     username = os.getenv("WEBSHARE_PROXY_USERNAME")
     password = os.getenv("WEBSHARE_PROXY_PASSWORD")
     
@@ -37,13 +38,16 @@ def get_proxy_config() -> Optional[dict]:
         logger.warning("Webshare proxy credentials not found")
         return None
         
-    logger.debug("Initializing Webshare proxy configuration")
-    # Format: protocol://username-session-{randomstring}:password@proxy-server:port
-    proxy_url = f"http://{username}:{password}@proxy.webshare.io:80/"
-    return {
+    logger.debug("Initializing requests session with proxy configuration")
+    session = requests.Session()
+    # Use rotating proxy format: username-rotating:password@p.webshare.io:80
+    proxy_url = f"http://{username}-rotating:{password}@p.webshare.io:80"
+    session.proxies = {
         "http": proxy_url,
         "https": proxy_url
     }
+    session.auth = HTTPProxyAuth(f"{username}-rotating", password)
+    return session
 
 @app.get("/")
 async def root():
@@ -59,14 +63,12 @@ async def get_transcript(
     try:
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
         
-        # Configure proxy
-        proxy_config = get_proxy_config()
-        if proxy_config:
-            logger.debug("Using Webshare proxy for requests")
-            YouTubeTranscriptApi.proxies = proxy_config
-            # Also configure requests library to use the same proxy
-            os.environ['HTTP_PROXY'] = proxy_config['http']
-            os.environ['HTTPS_PROXY'] = proxy_config['https']
+        # Configure proxy session
+        session = get_proxy_session()
+        if session:
+            logger.debug("Using Webshare proxy session for requests")
+            # Configure YouTubeTranscriptApi to use our session
+            YouTubeTranscriptApi.http_client = session
         else:
             logger.warning("No proxy configuration available, requests may be blocked")
         
@@ -173,11 +175,12 @@ async def list_languages(video_id: str):
     try:
         logger.debug(f"Listing languages for video {video_id}")
         
-        # Configure proxy
-        proxy_config = get_proxy_config()
-        if proxy_config:
-            logger.debug("Using Webshare proxy for requests")
-            YouTubeTranscriptApi.proxies = proxy_config
+        # Configure proxy session
+        session = get_proxy_session()
+        if session:
+            logger.debug("Using Webshare proxy session for requests")
+            # Configure YouTubeTranscriptApi to use our session
+            YouTubeTranscriptApi.http_client = session
         else:
             logger.warning("No proxy configuration available, requests may be blocked")
             

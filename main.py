@@ -10,7 +10,6 @@ import os
 from dotenv import load_dotenv
 import logging
 import requests
-from requests.auth import HTTPProxyAuth
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
@@ -29,8 +28,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def get_proxy_config() -> Optional[dict]:
-    """Initialize proxy configuration with Webshare credentials."""
+def configure_proxy() -> Optional[WebshareProxyConfig]:
+    """Initialize and configure Webshare proxy."""
     username = os.getenv("WEBSHARE_PROXY_USERNAME")
     password = os.getenv("WEBSHARE_PROXY_PASSWORD")
     
@@ -38,13 +37,13 @@ def get_proxy_config() -> Optional[dict]:
         logger.warning("Webshare proxy credentials not found")
         return None
         
-    logger.debug("Initializing proxy configuration")
-    # Use rotating proxy format: username-rotating:password@p.webshare.io:80
-    proxy_url = f"http://{username}-rotating:{password}@p.webshare.io:80"
-    return {
-        "http": proxy_url,
-        "https": proxy_url
-    }
+    logger.debug("Initializing Webshare proxy configuration")
+    return WebshareProxyConfig(
+        proxy_username=username,
+        proxy_password=password,
+        proxy_host="proxy.webshare.io",
+        proxy_port="80"
+    )
 
 @app.get("/")
 async def root():
@@ -61,43 +60,45 @@ async def get_transcript(
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
         
         # Configure proxy
-        proxy_config = get_proxy_config()
+        proxy_config = configure_proxy()
         if proxy_config:
             logger.debug("Using Webshare proxy for requests")
-            YouTubeTranscriptApi.proxies = proxy_config
+            # Create a new instance with proxy configuration
+            yt_api = YouTubeTranscriptApi(proxy=proxy_config)
         else:
             logger.warning("No proxy configuration available, requests may be blocked")
+            yt_api = YouTubeTranscriptApi()
         
         try:
             # First try to get the transcript in the requested language
             if language:
                 logger.debug(f"Attempting to fetch transcript in {language}")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
+                transcript = yt_api.get_transcript(video_id, languages=[language])
             else:
                 logger.debug("Attempting to fetch transcript in English")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                transcript = yt_api.get_transcript(video_id, languages=['en'])
         except Exception as e:
             logger.debug(f"Initial fetch attempt failed: {str(e)}")
             if language:
                 # If specific language fails, try English
                 try:
                     logger.debug("Falling back to English")
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                    transcript = yt_api.get_transcript(video_id, languages=['en'])
                     # Try to translate if needed
                     if language != 'en':
                         logger.debug(f"Attempting to translate to {language}")
-                        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                        transcript_list = yt_api.list_transcripts(video_id)
                         en_transcript = transcript_list.find_transcript(['en'])
                         transcript = en_transcript.translate(language).fetch()
                 except Exception as e2:
                     logger.debug(f"English fallback failed: {str(e2)}")
                     # If English fails, try any available language
                     logger.debug("Trying any available language")
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                    transcript = yt_api.get_transcript(video_id)
             else:
                 # If no specific language was requested, try any available language
                 logger.debug("No language specified, trying any available")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                transcript = yt_api.get_transcript(video_id)
         
         logger.debug(f"Successfully fetched transcript with {len(transcript)} segments")
         
@@ -172,14 +173,16 @@ async def list_languages(video_id: str):
         logger.debug(f"Listing languages for video {video_id}")
         
         # Configure proxy
-        proxy_config = get_proxy_config()
+        proxy_config = configure_proxy()
         if proxy_config:
             logger.debug("Using Webshare proxy for requests")
-            YouTubeTranscriptApi.proxies = proxy_config
+            # Create a new instance with proxy configuration
+            yt_api = YouTubeTranscriptApi(proxy=proxy_config)
         else:
             logger.warning("No proxy configuration available, requests may be blocked")
+            yt_api = YouTubeTranscriptApi()
             
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = yt_api.list_transcripts(video_id)
         
         available_transcripts = []
         for transcript in transcript_list:

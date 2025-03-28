@@ -26,44 +26,40 @@ async def root():
 @app.get("/transcript/{video_id}")
 async def get_transcript(video_id: str, language: Optional[str] = None):
     try:
-        # Configure language preferences
-        languages = [language] if language else ['en']
-        if 'en' not in languages:
-            languages.append('en')  # Add English as fallback
-        
-        # Fetch transcript
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # Initialize the API
+        ytt_api = YouTubeTranscriptApi()
         
         try:
-            # First try to get the transcript in the requested language
-            transcript = transcript_list.find_transcript(languages)
-        except:
-            # If that fails, try to get any transcript and translate it
-            try:
-                transcript = transcript_list.find_transcript(['en'])
-                if language and language != 'en':
-                    transcript = transcript.translate(language)
-            except:
-                # If English isn't available, just get the first available transcript
-                available_transcripts = list(transcript_list.transcript_data.keys())
-                if not available_transcripts:
-                    raise Exception("No transcripts available for this video")
-                transcript = transcript_list.find_transcript([available_transcripts[0]])
-                if language:
-                    try:
-                        transcript = transcript.translate(language)
-                    except:
-                        pass  # Keep original if translation fails
-        
-        # Fetch the actual transcript data
-        transcript_data = transcript.fetch()
+            # First try to fetch with the requested language
+            if language:
+                transcript = ytt_api.fetch(video_id, languages=[language])
+            else:
+                transcript = ytt_api.fetch(video_id, languages=['en'])
+        except Exception as e:
+            if language:
+                # If specific language fails, try English
+                try:
+                    transcript = ytt_api.fetch(video_id, languages=['en'])
+                    # Try to translate if needed
+                    if language != 'en':
+                        transcript = ytt_api.translate_transcript(transcript, language)
+                except:
+                    # If English fails, try any available language
+                    transcript = ytt_api.fetch(video_id)
+                    if language != transcript.language_code:
+                        try:
+                            transcript = ytt_api.translate_transcript(transcript, language)
+                        except:
+                            pass  # Keep original if translation fails
+            else:
+                # If no specific language was requested, try any available language
+                transcript = ytt_api.fetch(video_id)
         
         # Format transcript with timestamps
         formatted_transcript = ""
-        for snippet in transcript_data:
-            # Access attributes using the new format
+        for snippet in transcript.snippets:
             start = float(snippet.start)
-            text = snippet.text
+            text = snippet.text.strip()
             
             minutes = int(start // 60)
             seconds = int(start % 60)
@@ -80,10 +76,22 @@ async def get_transcript(video_id: str, language: Optional[str] = None):
         }
         
     except Exception as e:
-        print(f"Error fetching transcript: {str(e)}")  # Debug logging
+        error_message = str(e)
+        print(f"Error fetching transcript: {error_message}")  # Debug logging
+        
+        if "Subtitles are disabled" in error_message:
+            status_code = 404
+            detail = "This video does not have subtitles or transcripts available."
+        elif "Could not find transcript" in error_message:
+            status_code = 404
+            detail = f"No transcript available in the requested language: {language}"
+        else:
+            status_code = 500
+            detail = "An error occurred while fetching the transcript"
+            
         raise HTTPException(
-            status_code=404,
-            detail=f"Could not retrieve transcript: {str(e)}"
+            status_code=status_code,
+            detail=detail
         )
 
 if __name__ == "__main__":

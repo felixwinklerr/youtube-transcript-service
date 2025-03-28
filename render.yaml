@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: videosage-transcript-service
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        value: 8001
+    autoDeploy: true

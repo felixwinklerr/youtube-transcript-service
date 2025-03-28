@@ -60,13 +60,39 @@ GET /languages/{video_id}
 
 Returns available transcripts and translation options for a video.
 
+## Deployment
+
+### Deploy to Render.com
+
+1. Fork this repository
+2. Create a new Web Service on Render.com
+3. Connect your forked repository
+4. Add environment variables:
+   - `WEBSHARE_PROXY_USERNAME`: Your Webshare proxy username
+   - `WEBSHARE_PROXY_PASSWORD`: Your Webshare proxy password
+   - `PORT`: 10000 (Render's preferred port)
+
+The service will be automatically deployed when you push changes to your repository.
+
+### Using the Service
+
+Once deployed, you can use the service by making requests to your Render.com URL:
+
+```bash
+# Get available languages
+curl https://your-service.onrender.com/languages/VIDEO_ID
+
+# Get transcript
+curl https://your-service.onrender.com/transcript/VIDEO_ID?language=en&format=srt
+```
+
 ## Proxy Configuration
 
 This service uses Webshare proxy to avoid IP blocking by YouTube. To use it:
 
 1. Sign up for a Webshare proxy account at https://www.webshare.io/
 2. Get your proxy credentials
-3. Add them to your `.env` file
+3. Add them to your environment variables
 
 If no proxy credentials are provided, the service will attempt to make direct requests (may be blocked by YouTube).
 

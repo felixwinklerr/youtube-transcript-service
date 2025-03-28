@@ -1,10 +1,14 @@
 services:
   - type: web
-    name: videosage-transcript-service
+    name: youtube-transcript-service
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     envVars:
+      - key: WEBSHARE_PROXY_USERNAME
+        sync: false
+      - key: WEBSHARE_PROXY_PASSWORD
+        sync: false
       - key: PORT
-        value: 8001
+        value: 10000
     autoDeploy: true

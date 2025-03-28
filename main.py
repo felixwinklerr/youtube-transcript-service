@@ -38,7 +38,8 @@ def get_proxy_config() -> Optional[dict]:
         return None
         
     logger.debug("Initializing Webshare proxy configuration")
-    proxy_url = f"http://{username}:{password}@p.webshare.io:80/"
+    # Format: protocol://username-session-{randomstring}:password@proxy-server:port
+    proxy_url = f"http://{username}:{password}@proxy.webshare.io:80/"
     return {
         "http": proxy_url,
         "https": proxy_url

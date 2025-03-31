@@ -26,10 +26,13 @@ load_dotenv()
 # Configure proxy at module level
 username = os.getenv("WEBSHARE_PROXY_USERNAME")
 password = os.getenv("WEBSHARE_PROXY_PASSWORD")
+proxy_host = os.getenv("WEBSHARE_PROXY_HOST", "p.webshare.io")  # Default to p.webshare.io if not specified
+proxy_port = os.getenv("WEBSHARE_PROXY_PORT", "80")  # Default to 80 if not specified
+
 if username and password:
     logger.debug("Configuring Webshare proxy")
     # Format: protocol://username:password@host:port
-    proxy_url = f"http://{username}:{password}@proxy.webshare.io:80"
+    proxy_url = f"http://{username}:{password}@{proxy_host}:{proxy_port}"
     proxy_config = {
         "http": proxy_url,
         "https": proxy_url
@@ -44,10 +47,17 @@ if username and password:
     
     # Test proxy configuration
     try:
-        test_response = requests.get("https://api.ipify.org?format=json", proxies=proxy_config)
+        # Use a test URL that's less likely to be blocked
+        test_response = requests.get("http://ip-api.com/json", proxies=proxy_config, timeout=10)
         logger.debug(f"Proxy test response: {test_response.text}")
     except Exception as e:
         logger.error(f"Proxy test failed: {str(e)}")
+        # Try a fallback test with a different URL
+        try:
+            test_response = requests.get("https://httpbin.org/ip", proxies=proxy_config, timeout=10)
+            logger.debug(f"Fallback proxy test response: {test_response.text}")
+        except Exception as e2:
+            logger.error(f"Fallback proxy test also failed: {str(e2)}")
 else:
     logger.warning("Webshare proxy credentials not found")
     logger.debug("Environment variables available: " + ", ".join(os.environ.keys()))

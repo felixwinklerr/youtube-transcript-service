@@ -10,6 +10,7 @@ import os
 from dotenv import load_dotenv
 import logging
 import requests
+import urllib3
 
 # Configure logging
 logging.basicConfig(
@@ -23,19 +24,16 @@ logging.getLogger("urllib3.connectionpool").setLevel(logging.DEBUG)
 
 load_dotenv()
 
-# Log all environment variables (excluding sensitive values)
-env_vars = {k: '***' if 'PASSWORD' in k or 'SECRET' in k else v for k, v in os.environ.items()}
-logger.debug(f"Environment variables: {env_vars}")
-
 # Configure proxy at module level
 username = os.getenv("WEBSHARE_PROXY_USERNAME")
 password = os.getenv("WEBSHARE_PROXY_PASSWORD")
-proxy_host = os.getenv("WEBSHARE_PROXY_HOST", "p.webshare.io")  # Default to p.webshare.io if not specified
-proxy_port = os.getenv("WEBSHARE_PROXY_PORT", "80")  # Default to 80 if not specified
+proxy_host = os.getenv("WEBSHARE_PROXY_HOST")
+proxy_port = os.getenv("WEBSHARE_PROXY_PORT")
 
+logger.debug(f"Environment variables: {dict(os.environ)}")
 logger.debug(f"Proxy configuration: Host={proxy_host}, Port={proxy_port}, Username={'Present' if username else 'Missing'}, Password={'Present' if password else 'Missing'}")
 
-if username and password:
+if username and password and proxy_host and proxy_port:
     logger.debug("Configuring Webshare proxy")
     # Format: protocol://username:password@host:port
     proxy_url = f"http://{username}:{password}@{proxy_host}:{proxy_port}"
@@ -43,11 +41,24 @@ if username and password:
         "http": proxy_url,
         "https": proxy_url
     }
+    
     # Configure proxy for YouTubeTranscriptApi
     YouTubeTranscriptApi.proxies = proxy_config
-    # Also configure proxy for the requests library
+    
+    # Configure proxy for the requests library
     os.environ["HTTP_PROXY"] = proxy_url
     os.environ["HTTPS_PROXY"] = proxy_url
+    
+    # Configure proxy for urllib3
+    proxy_manager = urllib3.ProxyManager(
+        proxy_url,
+        num_pools=10,
+        maxsize=10,
+        retries=False,
+        timeout=urllib3.Timeout(connect=2, read=2)
+    )
+    urllib3.disable_warnings()
+    
     logger.debug("Proxy configuration complete")
     logger.debug(f"Proxy settings: {proxy_config}")
     
@@ -56,24 +67,18 @@ if username and password:
         # Use a test URL that's less likely to be blocked
         test_response = requests.get("http://ip-api.com/json", proxies=proxy_config, timeout=10)
         logger.debug(f"Proxy test response: {test_response.text}")
+        
+        # Also test with YouTube to verify proxy works for YouTube requests
+        test_response = requests.get("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 
+                                   proxies=proxy_config, 
+                                   timeout=10,
+                                   headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+        logger.debug(f"YouTube test status code: {test_response.status_code}")
     except Exception as e:
         logger.error(f"Proxy test failed: {str(e)}")
-        # Try a fallback test with a different URL
-        try:
-            test_response = requests.get("https://httpbin.org/ip", proxies=proxy_config, timeout=10)
-            logger.debug(f"Fallback proxy test response: {test_response.text}")
-        except Exception as e2:
-            logger.error(f"Fallback proxy test also failed: {str(e2)}")
 else:
     logger.warning("Webshare proxy credentials not found")
     logger.debug("Environment variables available: " + ", ".join(os.environ.keys()))
-    
-    # Try a direct connection to see if it works without proxy
-    try:
-        test_response = requests.get("https://www.youtube.com", timeout=10)
-        logger.debug(f"Direct connection test status code: {test_response.status_code}")
-    except Exception as e:
-        logger.error(f"Direct connection test failed: {str(e)}")
 
 app = FastAPI(title="YouTube Transcript Service")
 
@@ -88,14 +93,7 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    # Include proxy configuration status in the root endpoint
-    proxy_status = "configured" if username and password else "not configured"
-    return {
-        "status": "ok", 
-        "service": "YouTube Transcript Service",
-        "proxy": proxy_status,
-        "environment": "production" if os.getenv("RENDER") else "development"
-    }
+    return {"status": "ok", "service": "YouTube Transcript Service"}
 
 @app.get("/transcript/{video_id}")
 async def get_transcript(
@@ -111,32 +109,32 @@ async def get_transcript(
             # First try to get the transcript in the requested language
             if language:
                 logger.debug(f"Attempting to fetch transcript in {language}")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[language], proxies=proxy_config)
             else:
                 logger.debug("Attempting to fetch transcript in English")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'], proxies=proxy_config)
         except Exception as e:
             logger.debug(f"Initial fetch attempt failed: {str(e)}")
             if language:
                 # If specific language fails, try English
                 try:
                     logger.debug("Falling back to English")
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'], proxies=proxy_config)
                     # Try to translate if needed
                     if language != 'en':
                         logger.debug(f"Attempting to translate to {language}")
-                        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, proxies=proxy_config)
                         en_transcript = transcript_list.find_transcript(['en'])
                         transcript = en_transcript.translate(language).fetch()
                 except Exception as e2:
                     logger.debug(f"English fallback failed: {str(e2)}")
                     # If English fails, try any available language
                     logger.debug("Trying any available language")
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                    transcript = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxy_config)
             else:
                 # If no specific language was requested, try any available language
                 logger.debug("No language specified, trying any available")
-                transcript = YouTubeTranscriptApi.get_transcript(video_id)
+                transcript = YouTubeTranscriptApi.get_transcript(video_id, proxies=proxy_config)
         
         logger.debug(f"Successfully fetched transcript with {len(transcript)} segments")
         
@@ -210,7 +208,7 @@ async def list_languages(video_id: str):
     try:
         logger.debug(f"Listing languages for video {video_id}")
             
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, proxies=proxy_config)
         
         available_transcripts = []
         for transcript in transcript_list:
@@ -249,5 +247,5 @@ async def list_languages(video_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", "8001"))
+    port = int(os.getenv("PORT", "10000"))
     uvicorn.run(app, host="0.0.0.0", port=port) 

@@ -27,11 +27,39 @@ logging.getLogger("urllib3.connectionpool").setLevel(logging.DEBUG)
 
 load_dotenv()
 
+def validate_env_vars():
+    """Validate required environment variables are present and properly formatted."""
+    required_vars = {
+        "WEBSHARE_PROXY_HOSTS": os.getenv("WEBSHARE_PROXY_HOSTS"),
+        "WEBSHARE_PROXY_PORTS": os.getenv("WEBSHARE_PROXY_PORTS"),
+        "WEBSHARE_PROXY_USERNAMES": os.getenv("WEBSHARE_PROXY_USERNAMES"),
+        "WEBSHARE_PROXY_PASSWORD": os.getenv("WEBSHARE_PROXY_PASSWORD")
+    }
+    
+    missing_vars = [k for k, v in required_vars.items() if not v]
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+        
+    # Validate that lists have matching lengths
+    hosts = required_vars["WEBSHARE_PROXY_HOSTS"].split(",")
+    ports = required_vars["WEBSHARE_PROXY_PORTS"].split(",")
+    usernames = required_vars["WEBSHARE_PROXY_USERNAMES"].split(",")
+    
+    if not (len(hosts) == len(ports) == len(usernames)):
+        logger.error("Mismatch in number of hosts, ports, and usernames")
+        return False
+        
+    return True
+
 # Configure proxy at module level
-proxy_hosts = os.getenv("WEBSHARE_PROXY_HOSTS", "").split(",")  # Multiple hosts separated by commas
-proxy_ports = os.getenv("WEBSHARE_PROXY_PORTS", "").split(",")  # Multiple ports separated by commas
-proxy_usernames = os.getenv("WEBSHARE_PROXY_USERNAMES", "").split(",")  # Multiple usernames separated by commas
-proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")  # Single password for all proxies
+if not validate_env_vars():
+    logger.error("Environment validation failed. Service may not work properly.")
+else:
+    proxy_hosts = os.getenv("WEBSHARE_PROXY_HOSTS", "").split(",")
+    proxy_ports = os.getenv("WEBSHARE_PROXY_PORTS", "").split(",")
+    proxy_usernames = os.getenv("WEBSHARE_PROXY_USERNAMES", "").split(",")
+    proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
 
 # Rate limiting configuration
 MIN_REQUEST_INTERVAL = 2  # Minimum seconds between requests to the same proxy
@@ -49,25 +77,31 @@ def create_proxy_url(host: str, port: str, username: str) -> str:
 def get_random_proxy() -> dict:
     """Get a random proxy configuration from the available proxies, respecting rate limits."""
     if not proxy_configs:
+        logger.error("No proxy configurations available!")
         return None
         
-    # Filter out recently used proxies
     current_time = time.time()
-    available_proxies = [
-        proxy for proxy in proxy_configs
-        if current_time - last_proxy_use.get(proxy["http"], 0) >= MIN_REQUEST_INTERVAL
-    ]
     
-    if not available_proxies:
-        # If all proxies are rate-limited, wait for the one that will be available soonest
-        next_available = min(last_proxy_use.values()) + MIN_REQUEST_INTERVAL
-        wait_time = next_available - current_time
-        if wait_time > 0:
-            logger.debug(f"All proxies rate limited, waiting {wait_time:.2f} seconds")
-            time.sleep(wait_time)
-        return random.choice(proxy_configs)
-        
-    return random.choice(available_proxies)
+    # Sort proxies by last use time to prefer least recently used
+    available_proxies = sorted(
+        proxy_configs,
+        key=lambda p: last_proxy_use.get(p["http"], 0)
+    )
+    
+    # Find first proxy that's not rate limited
+    for proxy in available_proxies:
+        if current_time - last_proxy_use.get(proxy["http"], 0) >= MIN_REQUEST_INTERVAL:
+            return proxy
+            
+    # If all proxies are rate-limited, wait for the one that will be available soonest
+    next_available = min(last_proxy_use.values()) + MIN_REQUEST_INTERVAL
+    wait_time = next_available - current_time
+    if wait_time > 0:
+        logger.debug(f"All proxies rate limited, waiting {wait_time:.2f} seconds")
+        time.sleep(wait_time)
+        return available_proxies[0]
+    
+    return available_proxies[0]
 
 def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
     """Test a proxy configuration and return True if it's working."""
@@ -174,13 +208,20 @@ async def get_transcript(
     preserve_formatting: bool = False
 ):
     try:
+        if not proxy_configs:
+            raise HTTPException(
+                status_code=503,
+                detail="No proxy configurations available. Service is temporarily unavailable."
+            )
+            
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
         
         # Try each proxy until successful or all fail
         last_error = None
-        used_proxies = set()  # Keep track of which proxies we've tried
-        max_retries = len(proxy_configs) * 2  # Allow each proxy to be tried twice
+        used_proxies = set()
+        max_retries = min(len(proxy_configs) * 2, 10)  # Cap at 10 retries
         retry_count = 0
+        backoff_time = 1  # Start with 1 second backoff
         
         while retry_count < max_retries and len(used_proxies) < len(proxy_configs):
             try:
@@ -188,12 +229,12 @@ async def get_transcript(
                 if not proxy_config:
                     raise Exception("No proxy configurations available")
                 
-                # Get proxy identifier for logging and tracking
                 proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
                 proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
                 
-                # Skip if we've tried this proxy too recently
-                if proxy_id in used_proxies and retry_count < len(proxy_configs):
+                if proxy_id in used_proxies:
+                    time.sleep(backoff_time)
+                    backoff_time = min(backoff_time * 2, 30)  # Exponential backoff, max 30 seconds
                     continue
                     
                 used_proxies.add(proxy_id)
@@ -202,16 +243,23 @@ async def get_transcript(
                 YouTubeTranscriptApi.proxies = proxy_config
                 logger.debug(f"Attempt {retry_count} using proxy {proxy_id}")
                 
-                # Update last use time for this proxy
                 update_proxy_last_use(proxy_config)
                 
                 # First try to get the transcript in the requested language
                 if language:
                     logger.debug(f"Attempting to fetch transcript in {language}")
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
+                    transcript = YouTubeTranscriptApi().fetch(
+                        video_id, 
+                        languages=[language],
+                        preserve_formatting=preserve_formatting
+                    )
                 else:
                     logger.debug("Attempting to fetch transcript in English")
-                    transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
+                    transcript = YouTubeTranscriptApi().fetch(
+                        video_id, 
+                        languages=['en'],
+                        preserve_formatting=preserve_formatting
+                    )
                 
                 # If we get here, the request was successful
                 logger.debug(f"Successfully fetched transcript using proxy {proxy_id}")
@@ -383,6 +431,150 @@ async def list_languages(video_id: str):
         else:
             status_code = 500
             detail = f"An error occurred while fetching available languages: {error_message}"
+            
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail
+        )
+
+@app.get("/translate/{video_id}")
+async def translate_transcript(
+    video_id: str,
+    target_language: str,
+    source_language: Optional[str] = None,
+    format: Optional[Literal["text", "vtt", "srt", "json"]] = None,
+    preserve_formatting: bool = False
+):
+    try:
+        if not proxy_configs:
+            raise HTTPException(
+                status_code=503,
+                detail="No proxy configurations available. Service is temporarily unavailable."
+            )
+            
+        logger.debug(f"Translating transcript for video {video_id} to {target_language}")
+        
+        # Try each proxy until successful or all fail
+        last_error = None
+        used_proxies = set()
+        max_retries = min(len(proxy_configs) * 2, 10)
+        retry_count = 0
+        backoff_time = 1
+        
+        while retry_count < max_retries and len(used_proxies) < len(proxy_configs):
+            try:
+                proxy_config = get_random_proxy()
+                if not proxy_config:
+                    raise Exception("No proxy configurations available")
+                
+                proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
+                proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
+                
+                if proxy_id in used_proxies:
+                    time.sleep(backoff_time)
+                    backoff_time = min(backoff_time * 2, 30)
+                    continue
+                    
+                used_proxies.add(proxy_id)
+                retry_count += 1
+                
+                YouTubeTranscriptApi.proxies = proxy_config
+                logger.debug(f"Attempt {retry_count} using proxy {proxy_id}")
+                
+                update_proxy_last_use(proxy_config)
+                
+                # Get transcript list
+                transcript_list = YouTubeTranscriptApi().list(video_id)
+                
+                # Find source transcript
+                source_langs = [source_language] if source_language else ['en']
+                transcript = transcript_list.find_transcript(source_langs)
+                
+                # Translate to target language
+                translated = transcript.translate(target_language)
+                transcript_data = translated.fetch()
+                
+                logger.debug(f"Successfully translated transcript using proxy {proxy_id}")
+                
+                # Format the transcript according to the requested format
+                if format:
+                    formatter = None
+                    if format == "text":
+                        formatter = TextFormatter()
+                    elif format == "vtt":
+                        formatter = WebVTTFormatter()
+                    elif format == "srt":
+                        formatter = SRTFormatter()
+                    elif format == "json":
+                        formatter = JSONFormatter()
+                    
+                    if formatter:
+                        logger.debug(f"Formatting transcript as {format}")
+                        formatted_text = formatter.format_transcript(transcript_data)
+                        return {
+                            "text": formatted_text,
+                            "source": "youtube_transcript_api",
+                            "format": format,
+                            "video_id": video_id,
+                            "source_language": transcript.language_code,
+                            "target_language": target_language
+                        }
+                
+                # Default formatting with timestamps
+                formatted_transcript = ""
+                for entry in transcript_data:
+                    start = float(entry['start'])
+                    text = entry['text'].strip()
+                    
+                    minutes = int(start // 60)
+                    seconds = int(start % 60)
+                    timestamp = f"{minutes}:{seconds:02d}"
+                    formatted_transcript += f"{timestamp} - {text}\n"
+                
+                return {
+                    "text": formatted_transcript.strip(),
+                    "source": "youtube_transcript_api",
+                    "video_id": video_id,
+                    "source_language": transcript.language_code,
+                    "target_language": target_language
+                }
+                
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                logger.debug(f"Attempt with proxy {proxy_id} failed: {error_str}")
+                
+                if "429 Client Error: Too Many Requests" in error_str:
+                    last_proxy_use[proxy_config["http"]] = time.time() + 30
+                    logger.warning(f"Proxy {proxy_id} rate limited, marking as unavailable for 30 seconds")
+                
+                continue
+        else:
+            # All attempts failed
+            raise last_error if last_error else Exception("All proxy attempts failed")
+            
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"Error translating transcript: {error_message}")
+        
+        if "Subtitles are disabled" in error_message:
+            status_code = 404
+            detail = "This video does not have subtitles or transcripts available."
+        elif "Could not find transcript" in error_message:
+            status_code = 404
+            detail = f"No transcript available in the source language: {source_language}"
+        elif "Translation not available" in error_message:
+            status_code = 404
+            detail = f"Translation to {target_language} is not available."
+        elif "Video unavailable" in error_message:
+            status_code = 404
+            detail = "The video is unavailable or does not exist."
+        elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message:
+            status_code = 503
+            detail = "Service temporarily unavailable. Please try again later."
+        else:
+            status_code = 500
+            detail = f"An error occurred while translating the transcript: {error_message}"
             
         raise HTTPException(
             status_code=status_code,

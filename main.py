@@ -47,6 +47,42 @@ def get_random_proxy() -> dict:
         return None
     return random.choice(proxy_configs)
 
+def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
+    """Test a proxy configuration and return True if it's working."""
+    try:
+        # First test with ip-api.com
+        test_response = requests.get(
+            "http://ip-api.com/json",
+            proxies=proxy_config,
+            timeout=10
+        )
+        if test_response.status_code != 200 or "forbidden" in test_response.text.lower():
+            logger.error(f"Proxy {username}@{proxy_url} failed basic connectivity test")
+            return False
+            
+        logger.debug(f"Proxy {username}@{proxy_url} passed basic test: {test_response.text}")
+        
+        # Then test with YouTube
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        youtube_response = requests.get(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            proxies=proxy_config,
+            headers=headers,
+            timeout=10
+        )
+        if youtube_response.status_code != 200:
+            logger.error(f"Proxy {username}@{proxy_url} failed YouTube connectivity test")
+            return False
+            
+        logger.debug(f"Proxy {username}@{proxy_url} passed YouTube test")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Proxy {username}@{proxy_url} test failed with error: {str(e)}")
+        return False
+
 if proxy_hosts and proxy_ports and proxy_usernames and proxy_password:
     logger.debug("Configuring Webshare proxies")
     
@@ -60,29 +96,21 @@ if proxy_hosts and proxy_ports and proxy_usernames and proxy_password:
             "http": proxy_url,
             "https": proxy_url
         }
-        proxy_configs.append(proxy_config)
+        
+        # Test the proxy before adding it
+        proxy_netloc = f"{host.strip()}:{port.strip()}"
+        if test_proxy(proxy_config, username, proxy_netloc):
+            proxy_configs.append(proxy_config)
+            logger.debug(f"Added working proxy: {username}@{proxy_netloc}")
     
     if proxy_configs:
         # Configure proxy for YouTubeTranscriptApi with the first proxy (will be rotated later)
         YouTubeTranscriptApi.proxies = proxy_configs[0]
         
         logger.debug("Proxy configuration complete")
-        logger.debug(f"Number of proxy configurations: {len(proxy_configs)}")
-        
-        # Test each proxy configuration
-        for i, proxy_config in enumerate(proxy_configs):
-            try:
-                # Use a test URL that's less likely to be blocked
-                test_response = requests.get(
-                    "http://ip-api.com/json",
-                    proxies=proxy_config,
-                    timeout=10
-                )
-                proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
-                username = urlparse(proxy_config["http"]).username
-                logger.debug(f"Proxy {i+1} ({username}@{proxy_url}) test response: {test_response.text}")
-            except Exception as e:
-                logger.error(f"Proxy {i+1} test failed: {str(e)}")
+        logger.debug(f"Number of working proxy configurations: {len(proxy_configs)}")
+    else:
+        logger.error("No working proxies found!")
 else:
     logger.warning("Webshare proxy credentials not found")
     logger.debug("Environment variables available: " + ", ".join(os.environ.keys()))
@@ -127,8 +155,8 @@ async def get_transcript(
                     raise Exception("No proxy configurations available")
                 
                 # Get proxy identifier for logging and tracking
-                proxy_url = urlparse(proxy_config["http"])
-                proxy_id = f"{proxy_url.username}@{proxy_url.netloc.split('@')[1]}"
+                proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
+                proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
                 
                 # Skip if we've already tried this proxy
                 if proxy_id in used_proxies:
@@ -242,8 +270,8 @@ async def list_languages(video_id: str):
                     raise Exception("No proxy configurations available")
                 
                 # Get proxy identifier for logging and tracking
-                proxy_url = urlparse(proxy_config["http"])
-                proxy_id = f"{proxy_url.username}@{proxy_url.netloc.split('@')[1]}"
+                proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
+                proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
                 
                 # Skip if we've already tried this proxy
                 if proxy_id in used_proxies:

@@ -12,8 +12,14 @@ import logging
 import requests
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Also enable debug logging for urllib3 to see proxy connection details
+logging.getLogger("urllib3.connectionpool").setLevel(logging.DEBUG)
 
 load_dotenv()
 
@@ -22,13 +28,29 @@ username = os.getenv("WEBSHARE_PROXY_USERNAME")
 password = os.getenv("WEBSHARE_PROXY_PASSWORD")
 if username and password:
     logger.debug("Configuring Webshare proxy")
-    proxy_config = WebshareProxyConfig(
-        proxy_username=username,
-        proxy_password=password
-    )
+    # Format: protocol://username:password@host:port
+    proxy_url = f"http://{username}:{password}@proxy.webshare.io:80"
+    proxy_config = {
+        "http": proxy_url,
+        "https": proxy_url
+    }
+    # Configure proxy for YouTubeTranscriptApi
     YouTubeTranscriptApi.proxies = proxy_config
+    # Also configure proxy for the requests library
+    os.environ["HTTP_PROXY"] = proxy_url
+    os.environ["HTTPS_PROXY"] = proxy_url
+    logger.debug("Proxy configuration complete")
+    logger.debug(f"Proxy settings: {proxy_config}")
+    
+    # Test proxy configuration
+    try:
+        test_response = requests.get("https://api.ipify.org?format=json", proxies=proxy_config)
+        logger.debug(f"Proxy test response: {test_response.text}")
+    except Exception as e:
+        logger.error(f"Proxy test failed: {str(e)}")
 else:
     logger.warning("Webshare proxy credentials not found")
+    logger.debug("Environment variables available: " + ", ".join(os.environ.keys()))
 
 app = FastAPI(title="YouTube Transcript Service")
 

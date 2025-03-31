@@ -12,6 +12,7 @@ import logging
 import requests
 import urllib3
 import random
+import time
 from urllib.parse import urlparse
 
 # Configure logging
@@ -32,6 +33,10 @@ proxy_ports = os.getenv("WEBSHARE_PROXY_PORTS", "").split(",")  # Multiple ports
 proxy_usernames = os.getenv("WEBSHARE_PROXY_USERNAMES", "").split(",")  # Multiple usernames separated by commas
 proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")  # Single password for all proxies
 
+# Rate limiting configuration
+MIN_REQUEST_INTERVAL = 2  # Minimum seconds between requests to the same proxy
+last_proxy_use = {}  # Track when each proxy was last used
+
 logger.debug(f"Environment variables: {dict(os.environ)}")
 logger.debug(f"Proxy configuration: Hosts={proxy_hosts}, Ports={proxy_ports}, Usernames={proxy_usernames}, Password={'Present' if proxy_password else 'Missing'}")
 
@@ -42,10 +47,27 @@ def create_proxy_url(host: str, port: str, username: str) -> str:
     return f"http://{username}:{proxy_password}@{host.strip()}:{port.strip()}"
 
 def get_random_proxy() -> dict:
-    """Get a random proxy configuration from the available proxies."""
+    """Get a random proxy configuration from the available proxies, respecting rate limits."""
     if not proxy_configs:
         return None
-    return random.choice(proxy_configs)
+        
+    # Filter out recently used proxies
+    current_time = time.time()
+    available_proxies = [
+        proxy for proxy in proxy_configs
+        if current_time - last_proxy_use.get(proxy["http"], 0) >= MIN_REQUEST_INTERVAL
+    ]
+    
+    if not available_proxies:
+        # If all proxies are rate-limited, wait for the one that will be available soonest
+        next_available = min(last_proxy_use.values()) + MIN_REQUEST_INTERVAL
+        wait_time = next_available - current_time
+        if wait_time > 0:
+            logger.debug(f"All proxies rate limited, waiting {wait_time:.2f} seconds")
+            time.sleep(wait_time)
+        return random.choice(proxy_configs)
+        
+    return random.choice(available_proxies)
 
 def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
     """Test a proxy configuration and return True if it's working."""
@@ -64,7 +86,9 @@ def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
         
         # Then test with YouTube
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
         }
         youtube_response = requests.get(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -72,7 +96,10 @@ def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
             headers=headers,
             timeout=10
         )
-        if youtube_response.status_code != 200:
+        if youtube_response.status_code == 429:
+            logger.warning(f"Proxy {username}@{proxy_url} rate limited by YouTube")
+            return True  # Still consider it valid, we'll handle rate limiting separately
+        elif youtube_response.status_code != 200:
             logger.error(f"Proxy {username}@{proxy_url} failed YouTube connectivity test")
             return False
             
@@ -82,6 +109,10 @@ def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
     except Exception as e:
         logger.error(f"Proxy {username}@{proxy_url} test failed with error: {str(e)}")
         return False
+
+def update_proxy_last_use(proxy_config: dict):
+    """Update the last use time for a proxy."""
+    last_proxy_use[proxy_config["http"]] = time.time()
 
 if proxy_hosts and proxy_ports and proxy_usernames and proxy_password:
     logger.debug("Configuring Webshare proxies")
@@ -101,6 +132,7 @@ if proxy_hosts and proxy_ports and proxy_usernames and proxy_password:
         proxy_netloc = f"{host.strip()}:{port.strip()}"
         if test_proxy(proxy_config, username, proxy_netloc):
             proxy_configs.append(proxy_config)
+            last_proxy_use[proxy_url] = 0  # Initialize last use time
             logger.debug(f"Added working proxy: {username}@{proxy_netloc}")
     
     if proxy_configs:
@@ -147,8 +179,10 @@ async def get_transcript(
         # Try each proxy until successful or all fail
         last_error = None
         used_proxies = set()  # Keep track of which proxies we've tried
+        max_retries = len(proxy_configs) * 2  # Allow each proxy to be tried twice
+        retry_count = 0
         
-        while len(used_proxies) < len(proxy_configs):
+        while retry_count < max_retries and len(used_proxies) < len(proxy_configs):
             try:
                 proxy_config = get_random_proxy()
                 if not proxy_config:
@@ -158,14 +192,18 @@ async def get_transcript(
                 proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
                 proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
                 
-                # Skip if we've already tried this proxy
-                if proxy_id in used_proxies:
+                # Skip if we've tried this proxy too recently
+                if proxy_id in used_proxies and retry_count < len(proxy_configs):
                     continue
                     
                 used_proxies.add(proxy_id)
+                retry_count += 1
                 
                 YouTubeTranscriptApi.proxies = proxy_config
-                logger.debug(f"Attempt {len(used_proxies)} using proxy {proxy_id}")
+                logger.debug(f"Attempt {retry_count} using proxy {proxy_id}")
+                
+                # Update last use time for this proxy
+                update_proxy_last_use(proxy_config)
                 
                 # First try to get the transcript in the requested language
                 if language:
@@ -181,7 +219,14 @@ async def get_transcript(
                 
             except Exception as e:
                 last_error = e
-                logger.debug(f"Attempt with proxy {proxy_id} failed: {str(e)}")
+                error_str = str(e)
+                logger.debug(f"Attempt with proxy {proxy_id} failed: {error_str}")
+                
+                if "429 Client Error: Too Many Requests" in error_str:
+                    # If rate limited, wait longer before trying this proxy again
+                    last_proxy_use[proxy_config["http"]] = time.time() + 30  # Wait at least 30 seconds
+                    logger.warning(f"Proxy {proxy_id} rate limited, marking as unavailable for 30 seconds")
+                
                 continue
         else:
             # All attempts failed
@@ -242,7 +287,7 @@ async def get_transcript(
         elif "Video unavailable" in error_message:
             status_code = 404
             detail = "The video is unavailable or does not exist."
-        elif "YouTube is blocking requests from your IP" in error_message:
+        elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message:
             status_code = 503
             detail = "Service temporarily unavailable. Please try again later."
         else:
@@ -262,8 +307,10 @@ async def list_languages(video_id: str):
         # Try each proxy until successful or all fail
         last_error = None
         used_proxies = set()  # Keep track of which proxies we've tried
+        max_retries = len(proxy_configs) * 2  # Allow each proxy to be tried twice
+        retry_count = 0
         
-        while len(used_proxies) < len(proxy_configs):
+        while retry_count < max_retries and len(used_proxies) < len(proxy_configs):
             try:
                 proxy_config = get_random_proxy()
                 if not proxy_config:
@@ -273,14 +320,18 @@ async def list_languages(video_id: str):
                 proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
                 proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
                 
-                # Skip if we've already tried this proxy
-                if proxy_id in used_proxies:
+                # Skip if we've tried this proxy too recently
+                if proxy_id in used_proxies and retry_count < len(proxy_configs):
                     continue
                     
                 used_proxies.add(proxy_id)
+                retry_count += 1
                 
                 YouTubeTranscriptApi.proxies = proxy_config
-                logger.debug(f"Attempt {len(used_proxies)} using proxy {proxy_id}")
+                logger.debug(f"Attempt {retry_count} using proxy {proxy_id}")
+                
+                # Update last use time for this proxy
+                update_proxy_last_use(proxy_config)
                 
                 transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
                 
@@ -290,7 +341,14 @@ async def list_languages(video_id: str):
                 
             except Exception as e:
                 last_error = e
-                logger.debug(f"Attempt with proxy {proxy_id} failed: {str(e)}")
+                error_str = str(e)
+                logger.debug(f"Attempt with proxy {proxy_id} failed: {error_str}")
+                
+                if "429 Client Error: Too Many Requests" in error_str:
+                    # If rate limited, wait longer before trying this proxy again
+                    last_proxy_use[proxy_config["http"]] = time.time() + 30  # Wait at least 30 seconds
+                    logger.warning(f"Proxy {proxy_id} rate limited, marking as unavailable for 30 seconds")
+                
                 continue
         else:
             # All attempts failed
@@ -319,7 +377,7 @@ async def list_languages(video_id: str):
         if "Video unavailable" in error_message:
             status_code = 404
             detail = "The video is unavailable or does not exist."
-        elif "YouTube is blocking requests from your IP" in error_message:
+        elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message:
             status_code = 503
             detail = "Service temporarily unavailable. Please try again later."
         else:

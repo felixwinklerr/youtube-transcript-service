@@ -23,11 +23,17 @@ logging.getLogger("urllib3.connectionpool").setLevel(logging.DEBUG)
 
 load_dotenv()
 
+# Log all environment variables (excluding sensitive values)
+env_vars = {k: '***' if 'PASSWORD' in k or 'SECRET' in k else v for k, v in os.environ.items()}
+logger.debug(f"Environment variables: {env_vars}")
+
 # Configure proxy at module level
 username = os.getenv("WEBSHARE_PROXY_USERNAME")
 password = os.getenv("WEBSHARE_PROXY_PASSWORD")
 proxy_host = os.getenv("WEBSHARE_PROXY_HOST", "p.webshare.io")  # Default to p.webshare.io if not specified
 proxy_port = os.getenv("WEBSHARE_PROXY_PORT", "80")  # Default to 80 if not specified
+
+logger.debug(f"Proxy configuration: Host={proxy_host}, Port={proxy_port}, Username={'Present' if username else 'Missing'}, Password={'Present' if password else 'Missing'}")
 
 if username and password:
     logger.debug("Configuring Webshare proxy")
@@ -61,6 +67,13 @@ if username and password:
 else:
     logger.warning("Webshare proxy credentials not found")
     logger.debug("Environment variables available: " + ", ".join(os.environ.keys()))
+    
+    # Try a direct connection to see if it works without proxy
+    try:
+        test_response = requests.get("https://www.youtube.com", timeout=10)
+        logger.debug(f"Direct connection test status code: {test_response.status_code}")
+    except Exception as e:
+        logger.error(f"Direct connection test failed: {str(e)}")
 
 app = FastAPI(title="YouTube Transcript Service")
 
@@ -75,7 +88,14 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "YouTube Transcript Service"}
+    # Include proxy configuration status in the root endpoint
+    proxy_status = "configured" if username and password else "not configured"
+    return {
+        "status": "ok", 
+        "service": "YouTube Transcript Service",
+        "proxy": proxy_status,
+        "environment": "production" if os.getenv("RENDER") else "development"
+    }
 
 @app.get("/transcript/{video_id}")
 async def get_transcript(

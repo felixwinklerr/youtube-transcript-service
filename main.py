@@ -283,106 +283,84 @@ async def translate_transcript(
             )
             
         logger.debug(f"Translating transcript for video {video_id} to {target_language}")
+        logger.debug(f"Using proxy: {proxy_config['http']}")
         
-        # Try each proxy until successful or all fail
-        last_error = None
-        used_proxies = set()
-        max_retries = min(len(proxy_config) * 2, 10)
-        retry_count = 0
-        backoff_time = 1
-        
-        while retry_count < max_retries and len(used_proxies) < len(proxy_config):
-            try:
-                proxy_config = get_random_proxy()
-                if not proxy_config:
-                    raise Exception("No proxy configurations available")
-                
-                proxy_url = urlparse(proxy_config["http"]).netloc.split("@")[1]
-                proxy_id = f"{urlparse(proxy_config['http']).username}@{proxy_url}"
-                
-                if proxy_id in used_proxies:
-                    time.sleep(backoff_time)
-                    backoff_time = min(backoff_time * 2, 30)
-                    continue
-                    
-                used_proxies.add(proxy_id)
-                retry_count += 1
-                
-                YouTubeTranscriptApi.proxies = proxy_config
-                logger.debug(f"Attempt {retry_count} using proxy {proxy_id}")
-                
-                update_proxy_last_use(proxy_config)
-                
-                # Get transcript list
-                transcript_list = YouTubeTranscriptApi().list(video_id)
-                
-                # Find source transcript
-                source_langs = [source_language] if source_language else ['en']
-                transcript = transcript_list.find_transcript(source_langs)
-                
-                # Translate to target language
-                translated = transcript.translate(target_language)
-                transcript_data = translated.fetch()
-                
-                logger.debug(f"Successfully translated transcript using proxy {proxy_id}")
-                
-                # Format the transcript according to the requested format
-                if format:
-                    formatter = None
-                    if format == "text":
-                        formatter = TextFormatter()
-                    elif format == "vtt":
-                        formatter = WebVTTFormatter()
-                    elif format == "srt":
-                        formatter = SRTFormatter()
-                    elif format == "json":
-                        formatter = JSONFormatter()
-                    
-                    if formatter:
-                        logger.debug(f"Formatting transcript as {format}")
-                        formatted_text = formatter.format_transcript(transcript_data)
-                        return {
-                            "text": formatted_text,
-                            "source": "youtube_transcript_api",
-                            "format": format,
-                            "video_id": video_id,
-                            "source_language": transcript.language_code,
-                            "target_language": target_language
-                        }
-                
-                # Default formatting with timestamps
-                formatted_transcript = ""
-                for entry in transcript_data:
-                    start = float(entry['start'])
-                    text = entry['text'].strip()
-                    
-                    minutes = int(start // 60)
-                    seconds = int(start % 60)
-                    timestamp = f"{minutes}:{seconds:02d}"
-                    formatted_transcript += f"{timestamp} - {text}\n"
-                
-                return {
-                    "text": formatted_transcript.strip(),
-                    "source": "youtube_transcript_api",
-                    "video_id": video_id,
-                    "source_language": transcript.language_code,
-                    "target_language": target_language
-                }
-                
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-                logger.debug(f"Attempt with proxy {proxy_id} failed: {error_str}")
-                
-                if "429 Client Error: Too Many Requests" in error_str:
-                    last_proxy_use[proxy_config["http"]] = time.time() + 30
-                    logger.warning(f"Proxy {proxy_id} rate limited, marking as unavailable for 30 seconds")
-                
-                continue
-        else:
-            # All attempts failed
-            raise last_error if last_error else Exception("All proxy attempts failed")
+        try:
+            # Get transcript list
+            transcript_list = YouTubeTranscriptApi().list(video_id)
             
+            # Find source transcript
+            source_langs = [source_language] if source_language else ['en']
+            transcript = transcript_list.find_transcript(source_langs)
+            
+            # Translate to target language
+            translated = transcript.translate(target_language)
+            transcript_data = translated.fetch()
+            
+            logger.debug(f"Successfully translated transcript")
+            
+            # Format the transcript according to the requested format
+            if format:
+                formatter = None
+                if format == "text":
+                    formatter = TextFormatter()
+                elif format == "vtt":
+                    formatter = WebVTTFormatter()
+                elif format == "srt":
+                    formatter = SRTFormatter()
+                elif format == "json":
+                    formatter = JSONFormatter()
+                
+                if formatter:
+                    logger.debug(f"Formatting transcript as {format}")
+                    formatted_text = formatter.format_transcript(transcript_data)
+                    return {
+                        "text": formatted_text,
+                        "source": "youtube_transcript_api",
+                        "format": format,
+                        "video_id": video_id,
+                        "source_language": transcript.language_code,
+                        "target_language": target_language
+                    }
+            
+            # Default formatting with timestamps
+            formatted_transcript = ""
+            for entry in transcript_data:
+                start = float(entry['start'])
+                text = entry['text'].strip()
+                
+                minutes = int(start // 60)
+                seconds = int(start % 60)
+                timestamp = f"{minutes}:{seconds:02d}"
+                formatted_transcript += f"{timestamp} - {text}\n"
+            
+            return {
+                "text": formatted_transcript.strip(),
+                "source": "youtube_transcript_api",
+                "video_id": video_id,
+                "source_language": transcript.language_code,
+                "target_language": target_language
+            }
+            
+        except Exception as e:
+            error_str = str(e)
+            logger.error(f"Error translating transcript: {error_str}")
+            
+            if "429 Client Error: Too Many Requests" in error_str or "YouTube is blocking requests" in error_str:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Service temporarily unavailable due to rate limiting. Please try again later."
+                )
+            elif "Connection refused" in error_str or "Connection timed out" in error_str:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Proxy connection error. Please try again later."
+                )
+            else:
+                raise e
+                
+    except HTTPException:
+        raise
     except Exception as e:
         error_message = str(e)
         logger.error(f"Error translating transcript: {error_message}")
@@ -401,7 +379,10 @@ async def translate_transcript(
             detail = "The video is unavailable or does not exist."
         elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message:
             status_code = 503
-            detail = "Service temporarily unavailable. Please try again later."
+            detail = "Service temporarily unavailable due to rate limiting. Please try again later."
+        elif "Connection refused" in error_message or "Connection timed out" in error_message:
+            status_code = 503
+            detail = "Proxy connection error. Please try again later."
         else:
             status_code = 500
             detail = f"An error occurred while translating the transcript: {error_message}"

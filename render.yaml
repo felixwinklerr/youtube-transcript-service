@@ -3,7 +3,7 @@ services:
     name: youtube-transcript-service
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT
     envVars:
       - key: WEBSHARE_PROXY_USERNAME
         sync: false

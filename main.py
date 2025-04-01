@@ -89,12 +89,14 @@ async def get_transcript(
 ):
     try:
         if not proxy_config:
+            logger.error("No proxy configuration available")
             raise HTTPException(
                 status_code=503,
                 detail="Proxy configuration not available. Service is temporarily unavailable."
             )
             
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
+        logger.debug(f"Using proxy configuration: {proxy_config}")
         
         try:
             # First try to get the transcript in the requested language
@@ -159,16 +161,21 @@ async def get_transcript(
             error_str = str(e)
             logger.error(f"Error fetching transcript: {error_str}")
             
-            if "429 Client Error: Too Many Requests" in error_str:
-                # If rate limited, wait a bit and try again
-                time.sleep(5)
+            if "429 Client Error: Too Many Requests" in error_str or "YouTube is blocking requests" in error_str:
                 raise HTTPException(
                     status_code=503,
-                    detail="Service temporarily unavailable. Please try again later."
+                    detail="Service temporarily unavailable due to rate limiting. Please try again later."
+                )
+            elif "Connection refused" in error_str or "Connection timed out" in error_str:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Proxy connection error. Please try again later."
                 )
             else:
                 raise e
                 
+    except HTTPException:
+        raise
     except Exception as e:
         error_message = str(e)
         logger.error(f"Error fetching transcript: {error_message}")
@@ -184,7 +191,10 @@ async def get_transcript(
             detail = "The video is unavailable or does not exist."
         elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message:
             status_code = 503
-            detail = "Service temporarily unavailable. Please try again later."
+            detail = "Service temporarily unavailable due to rate limiting. Please try again later."
+        elif "Connection refused" in error_message or "Connection timed out" in error_message:
+            status_code = 503
+            detail = "Proxy connection error. Please try again later."
         else:
             status_code = 500
             detail = f"An error occurred while fetching the transcript: {error_message}"

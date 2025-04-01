@@ -11,8 +11,6 @@ from dotenv import load_dotenv
 import logging
 import requests
 import urllib3
-import random
-import time
 from urllib.parse import urlparse
 
 # Configure logging
@@ -42,6 +40,7 @@ def validate_env_vars():
     return True
 
 # Configure proxy at module level
+proxy_config = None
 if not validate_env_vars():
     logger.error("Environment validation failed. Service may not work properly.")
 else:
@@ -59,125 +58,8 @@ else:
     YouTubeTranscriptApi.proxies = proxy_config
     logger.debug("Proxy configuration complete")
 
-# Rate limiting configuration
-MIN_REQUEST_INTERVAL = 2  # Minimum seconds between requests to the same proxy
-last_proxy_use = {}  # Track when each proxy was last used
-
 logger.debug(f"Environment variables: {dict(os.environ)}")
 logger.debug(f"Proxy configuration: Username={proxy_username}, Password={'Present' if proxy_password else 'Missing'}")
-
-proxy_configs = []
-
-def create_proxy_url(host: str, port: str, username: str) -> str:
-    """Create a proxy URL with the given host, port, and username."""
-    return f"http://{username}:{proxy_password}@{host.strip()}:{port.strip()}"
-
-def get_random_proxy() -> dict:
-    """Get a random proxy configuration from the available proxies, respecting rate limits."""
-    if not proxy_configs:
-        logger.error("No proxy configurations available!")
-        return None
-        
-    current_time = time.time()
-    
-    # Sort proxies by last use time to prefer least recently used
-    available_proxies = sorted(
-        proxy_configs,
-        key=lambda p: last_proxy_use.get(p["http"], 0)
-    )
-    
-    # Find first proxy that's not rate limited
-    for proxy in available_proxies:
-        if current_time - last_proxy_use.get(proxy["http"], 0) >= MIN_REQUEST_INTERVAL:
-            return proxy
-            
-    # If all proxies are rate-limited, wait for the one that will be available soonest
-    next_available = min(last_proxy_use.values()) + MIN_REQUEST_INTERVAL
-    wait_time = next_available - current_time
-    if wait_time > 0:
-        logger.debug(f"All proxies rate limited, waiting {wait_time:.2f} seconds")
-        time.sleep(wait_time)
-        return available_proxies[0]
-    
-    return available_proxies[0]
-
-def test_proxy(proxy_config: dict, username: str, proxy_url: str) -> bool:
-    """Test a proxy configuration and return True if it's working."""
-    try:
-        # First test with ip-api.com
-        test_response = requests.get(
-            "http://ip-api.com/json",
-            proxies=proxy_config,
-            timeout=10
-        )
-        if test_response.status_code != 200 or "forbidden" in test_response.text.lower():
-            logger.error(f"Proxy {username}@{proxy_url} failed basic connectivity test")
-            return False
-            
-        logger.debug(f"Proxy {username}@{proxy_url} passed basic test: {test_response.text}")
-        
-        # Then test with YouTube
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-        }
-        youtube_response = requests.get(
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            proxies=proxy_config,
-            headers=headers,
-            timeout=10
-        )
-        if youtube_response.status_code == 429:
-            logger.warning(f"Proxy {username}@{proxy_url} rate limited by YouTube")
-            return True  # Still consider it valid, we'll handle rate limiting separately
-        elif youtube_response.status_code != 200:
-            logger.error(f"Proxy {username}@{proxy_url} failed YouTube connectivity test")
-            return False
-            
-        logger.debug(f"Proxy {username}@{proxy_url} passed YouTube test")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Proxy {username}@{proxy_url} test failed with error: {str(e)}")
-        return False
-
-def update_proxy_last_use(proxy_config: dict):
-    """Update the last use time for a proxy."""
-    last_proxy_use[proxy_config["http"]] = time.time()
-
-if proxy_username and proxy_password:
-    logger.debug("Configuring Webshare proxies")
-    
-    # Create proxy configurations for each host-port-username combination
-    for host, port, username in zip(proxy_hosts, proxy_ports, proxy_usernames):
-        if not host.strip() or not port.strip() or not username.strip():
-            continue
-            
-        proxy_url = create_proxy_url(host, port, username)
-        proxy_config = {
-            "http": proxy_url,
-            "https": proxy_url
-        }
-        
-        # Test the proxy before adding it
-        proxy_netloc = f"{host.strip()}:{port.strip()}"
-        if test_proxy(proxy_config, username, proxy_netloc):
-            proxy_configs.append(proxy_config)
-            last_proxy_use[proxy_url] = 0  # Initialize last use time
-            logger.debug(f"Added working proxy: {username}@{proxy_netloc}")
-    
-    if proxy_configs:
-        # Configure proxy for YouTubeTranscriptApi with the first proxy (will be rotated later)
-        YouTubeTranscriptApi.proxies = proxy_configs[0]
-        
-        logger.debug("Proxy configuration complete")
-        logger.debug(f"Number of working proxy configurations: {len(proxy_configs)}")
-    else:
-        logger.error("No working proxies found!")
-else:
-    logger.warning("Webshare proxy credentials not found")
-    logger.debug("Environment variables available: " + ", ".join(os.environ.keys()))
 
 app = FastAPI(title="YouTube Transcript Service")
 
@@ -195,7 +77,7 @@ async def root():
     return {
         "status": "ok",
         "service": "YouTube Transcript Service",
-        "proxy_count": len(proxy_configs)
+        "proxy_configured": proxy_config is not None
     }
 
 @app.get("/transcript/{video_id}")

@@ -47,19 +47,20 @@ else:
     proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
     proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
     
-    # Configure rotating proxy endpoint
-    proxy_url = f"http://{proxy_username}:{proxy_password}@p.webshare.io:80"
-    proxy_config = {
-        "http": proxy_url,
-        "https": proxy_url
-    }
+    # Configure WebshareProxyConfig
+    proxy_config = WebshareProxyConfig(
+        username=proxy_username,
+        password=proxy_password,
+        host="p.webshare.io",
+        port="80"
+    )
     
     # Configure proxy for YouTubeTranscriptApi
     YouTubeTranscriptApi.proxies = proxy_config
     logger.debug("Proxy configuration complete")
 
 logger.debug(f"Environment variables: {dict(os.environ)}")
-logger.debug(f"Proxy configuration: Username={proxy_username}, Password={'Present' if proxy_password else 'Missing'}")
+logger.debug(f"Proxy configuration: Username={proxy_username}@p.webshare.io:80")
 
 app = FastAPI(title="YouTube Transcript Service")
 
@@ -96,7 +97,7 @@ async def get_transcript(
             )
             
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
-        logger.debug(f"Using proxy configuration: {proxy_config}")
+        logger.debug(f"Using proxy: {proxy_config.username}@{proxy_config.host}:{proxy_config.port}")
         
         try:
             # First try to get the transcript in the requested language
@@ -276,10 +277,10 @@ async def translate_transcript(
     preserve_formatting: bool = False
 ):
     try:
-        if not proxy_configs:
+        if not proxy_config:
             raise HTTPException(
                 status_code=503,
-                detail="No proxy configurations available. Service is temporarily unavailable."
+                detail="No proxy configuration available. Service is temporarily unavailable."
             )
             
         logger.debug(f"Translating transcript for video {video_id} to {target_language}")
@@ -287,11 +288,11 @@ async def translate_transcript(
         # Try each proxy until successful or all fail
         last_error = None
         used_proxies = set()
-        max_retries = min(len(proxy_configs) * 2, 10)
+        max_retries = min(len(proxy_config) * 2, 10)
         retry_count = 0
         backoff_time = 1
         
-        while retry_count < max_retries and len(used_proxies) < len(proxy_configs):
+        while retry_count < max_retries and len(used_proxies) < len(proxy_config):
             try:
                 proxy_config = get_random_proxy()
                 if not proxy_config:

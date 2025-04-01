@@ -47,13 +47,12 @@ else:
     proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
     proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
     
-    # Configure WebshareProxyConfig
-    proxy_config = WebshareProxyConfig(
-        username=proxy_username,
-        password=proxy_password,
-        host="p.webshare.io",
-        port="80"
-    )
+    # Configure proxy using dictionary format
+    proxy_url = f"http://{proxy_username}:{proxy_password}@p.webshare.io:80"
+    proxy_config = {
+        "http": proxy_url,
+        "https": proxy_url
+    }
     
     # Configure proxy for YouTubeTranscriptApi
     YouTubeTranscriptApi.proxies = proxy_config
@@ -97,7 +96,7 @@ async def get_transcript(
             )
             
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
-        logger.debug(f"Using proxy: {proxy_config.username}@{proxy_config.host}:{proxy_config.port}")
+        logger.debug(f"Using proxy: {proxy_config['http']}")
         
         try:
             # First try to get the transcript in the requested language

@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 import logging
 import requests
 import urllib3
+import time
+import random
 from urllib.parse import urlparse
 
 # Configure logging
@@ -24,6 +26,22 @@ logger = logging.getLogger(__name__)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.DEBUG)
 
 load_dotenv()
+
+# Browser-like headers
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'DNT': '1',
+    'Connection': 'keep-alive',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0'
+}
 
 def validate_env_vars():
     """Validate required environment variables are present and properly formatted."""
@@ -54,9 +72,27 @@ else:
         "https": proxy_url
     }
     
-    # Configure proxy for YouTubeTranscriptApi
+    # Configure proxy for YouTubeTranscriptApi with headers
     YouTubeTranscriptApi.proxies = proxy_config
+    YouTubeTranscriptApi.headers = HEADERS
     logger.debug("Proxy configuration complete")
+
+# Add random delay between requests
+last_request_time = 0
+MIN_REQUEST_INTERVAL = 2  # minimum seconds between requests
+
+def wait_between_requests():
+    """Add a random delay between requests to avoid rate limiting."""
+    global last_request_time
+    current_time = time.time()
+    time_since_last = current_time - last_request_time
+    
+    if time_since_last < MIN_REQUEST_INTERVAL:
+        delay = MIN_REQUEST_INTERVAL - time_since_last + random.uniform(0.5, 2.0)
+        logger.debug(f"Waiting {delay:.2f} seconds before next request")
+        time.sleep(delay)
+    
+    last_request_time = time.time()
 
 logger.debug(f"Environment variables: {dict(os.environ)}")
 logger.debug(f"Proxy configuration: Username={proxy_username}@p.webshare.io:80")
@@ -97,6 +133,9 @@ async def get_transcript(
             
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
         logger.debug(f"Using proxy: {proxy_config['http']}")
+        
+        # Add delay between requests
+        wait_between_requests()
         
         try:
             # First try to get the transcript in the requested language
@@ -161,10 +200,12 @@ async def get_transcript(
             error_str = str(e)
             logger.error(f"Error fetching transcript: {error_str}")
             
-            if "429 Client Error: Too Many Requests" in error_str or "YouTube is blocking requests" in error_str:
+            if "429 Client Error: Too Many Requests" in error_str or "YouTube is blocking requests" in error_str or "/sorry/" in error_str:
+                # If we hit reCAPTCHA or rate limit, wait longer and suggest retry
+                time.sleep(random.uniform(3, 5))
                 raise HTTPException(
                     status_code=503,
-                    detail="Service temporarily unavailable due to rate limiting. Please try again later."
+                    detail="Service temporarily unavailable due to rate limiting. Please try again in a few minutes."
                 )
             elif "Connection refused" in error_str or "Connection timed out" in error_str:
                 raise HTTPException(
@@ -189,9 +230,9 @@ async def get_transcript(
         elif "Video unavailable" in error_message:
             status_code = 404
             detail = "The video is unavailable or does not exist."
-        elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message:
+        elif "YouTube is blocking requests from your IP" in error_message or "429" in error_message or "/sorry/" in error_message:
             status_code = 503
-            detail = "Service temporarily unavailable due to rate limiting. Please try again later."
+            detail = "Service temporarily unavailable due to rate limiting. Please try again in a few minutes."
         elif "Connection refused" in error_message or "Connection timed out" in error_message:
             status_code = 503
             detail = "Proxy connection error. Please try again later."

@@ -15,6 +15,8 @@ import time
 import random
 from urllib.parse import urlparse
 import http.cookiejar
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Configure logging
 logging.basicConfig(
@@ -49,6 +51,27 @@ def get_headers():
         'sec-ch-ua-platform': '"Windows"'
     }
 
+# Configure session with retries and backoff
+def create_session():
+    session = requests.Session()
+    
+    # Configure retry strategy
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    
+    # Add retry adapter to both HTTP and HTTPS
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    # Set headers
+    session.headers.update(get_headers())
+    
+    return session
+
 # Configure cookie handling
 cookie_jar = http.cookiejar.CookieJar()
 
@@ -68,6 +91,7 @@ def validate_env_vars():
 
 # Configure proxy at module level
 proxy_config = None
+session = None
 if not validate_env_vars():
     logger.error("Environment validation failed. Service may not work properly.")
 else:
@@ -81,11 +105,16 @@ else:
         "https": proxy_url
     }
     
-    # Configure proxy and headers for YouTubeTranscriptApi
+    # Create and configure session
+    session = create_session()
+    session.proxies = proxy_config
+    session.cookies = cookie_jar
+    
+    # Configure YouTubeTranscriptApi with session
     YouTubeTranscriptApi.proxies = proxy_config
-    YouTubeTranscriptApi.headers = get_headers()  # Use dynamic headers
-    YouTubeTranscriptApi.cookies = cookie_jar
-    logger.debug("Proxy configuration complete")
+    YouTubeTranscriptApi.headers = session.headers
+    YouTubeTranscriptApi.cookies = session.cookies
+    logger.debug("Proxy and session configuration complete")
 
 # Add random delay between requests with exponential backoff
 last_request_time = 0
@@ -95,7 +124,7 @@ BASE_DELAY = 5
 
 def wait_between_requests(retry_count=0):
     """Add a random delay between requests with exponential backoff."""
-    global last_request_time
+    global last_request_time, session
     current_time = time.time()
     time_since_last = current_time - last_request_time
     
@@ -111,8 +140,10 @@ def wait_between_requests(retry_count=0):
     
     last_request_time = time.time()
     
-    # Update headers with new random values
-    YouTubeTranscriptApi.headers = get_headers()
+    # Update session with new headers
+    if session:
+        session.headers.update(get_headers())
+        YouTubeTranscriptApi.headers = session.headers
 
 logger.debug(f"Environment variables: {dict(os.environ)}")
 logger.debug(f"Proxy configuration: Username={proxy_username}@p.webshare.io:80")

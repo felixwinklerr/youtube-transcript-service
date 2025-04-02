@@ -51,30 +51,6 @@ def get_headers():
         'sec-ch-ua-platform': '"Windows"'
     }
 
-# Configure session with retries and backoff
-def create_session():
-    session = requests.Session()
-    
-    # Configure retry strategy
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
-    
-    # Add retry adapter to both HTTP and HTTPS
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    # Set headers
-    session.headers.update(get_headers())
-    
-    return session
-
-# Configure cookie handling
-cookie_jar = http.cookiejar.CookieJar()
-
 def validate_env_vars():
     """Validate required environment variables are present and properly formatted."""
     required_vars = {
@@ -89,9 +65,9 @@ def validate_env_vars():
     
     return True
 
-# Configure proxy at module level
+# Configure proxy and API at module level
 proxy_config = None
-session = None
+ytt_api = None
 if not validate_env_vars():
     logger.error("Environment validation failed. Service may not work properly.")
 else:
@@ -100,22 +76,19 @@ else:
     
     # Configure proxy using WebshareProxyConfig
     proxy_config = WebshareProxyConfig(
-        host="p.webshare.io",
-        port=80,
-        username=proxy_username,
-        password=proxy_password
+        proxy_username=proxy_username,
+        proxy_password=proxy_password
     )
     
-    # Create and configure session
-    session = create_session()
-    session.headers.update(get_headers())
-    session.cookies = cookie_jar
+    # Initialize YouTubeTranscriptApi with proxy config and headers
+    ytt_api = YouTubeTranscriptApi(
+        http_client=requests.Session(),  # Fresh session for each instance
+        proxy_config=proxy_config
+    )
     
-    # Configure YouTubeTranscriptApi with proxy config
-    YouTubeTranscriptApi.proxies = proxy_config
-    YouTubeTranscriptApi.headers = session.headers
-    YouTubeTranscriptApi.cookies = session.cookies
-    logger.debug("Proxy and session configuration complete")
+    # Update headers
+    ytt_api.http_client.headers.update(get_headers())
+    logger.debug("YouTubeTranscriptApi configuration complete")
 
 # Add random delay between requests with exponential backoff
 last_request_time = 0
@@ -125,7 +98,7 @@ BASE_DELAY = 5
 
 def wait_between_requests(retry_count=0):
     """Add a random delay between requests with exponential backoff."""
-    global last_request_time, session
+    global last_request_time, ytt_api
     current_time = time.time()
     time_since_last = current_time - last_request_time
     
@@ -141,13 +114,12 @@ def wait_between_requests(retry_count=0):
     
     last_request_time = time.time()
     
-    # Update session with new headers
-    if session:
-        session.headers.update(get_headers())
-        YouTubeTranscriptApi.headers = session.headers
+    # Update headers
+    if ytt_api and ytt_api.http_client:
+        ytt_api.http_client.headers.update(get_headers())
 
 logger.debug(f"Environment variables: {dict(os.environ)}")
-logger.debug(f"Proxy configuration: Username={proxy_username}@p.webshare.io:80")
+logger.debug(f"Proxy configuration: Username={proxy_username}")
 
 app = FastAPI(title="YouTube Transcript Service")
 
@@ -176,7 +148,7 @@ async def get_transcript(
     preserve_formatting: bool = False
 ):
     try:
-        if not proxy_config:
+        if not proxy_config or not ytt_api:
             logger.error("No proxy configuration available")
             raise HTTPException(
                 status_code=503,
@@ -184,7 +156,6 @@ async def get_transcript(
             )
             
         logger.debug(f"Fetching transcript for video {video_id} with language {language}, format {format}")
-        logger.debug(f"Using proxy: {proxy_config['http']}")
         
         last_error = None
         for retry in range(MAX_RETRIES):
@@ -195,14 +166,14 @@ async def get_transcript(
                 # First try to get the transcript in the requested language
                 if language:
                     logger.debug(f"Attempting to fetch transcript in {language} (retry {retry})")
-                    transcript = YouTubeTranscriptApi().fetch(
+                    transcript = ytt_api.fetch(
                         video_id, 
                         languages=[language],
                         preserve_formatting=preserve_formatting
                     )
                 else:
                     logger.debug(f"Attempting to fetch transcript in English (retry {retry})")
-                    transcript = YouTubeTranscriptApi().fetch(
+                    transcript = ytt_api.fetch(
                         video_id, 
                         languages=['en'],
                         preserve_formatting=preserve_formatting

@@ -98,19 +98,20 @@ else:
     proxy_username = os.getenv("WEBSHARE_PROXY_USERNAME")
     proxy_password = os.getenv("WEBSHARE_PROXY_PASSWORD")
     
-    # Configure proxy using dictionary format
-    proxy_url = f"http://{proxy_username}:{proxy_password}@p.webshare.io:80"
-    proxy_config = {
-        "http": proxy_url,
-        "https": proxy_url
-    }
+    # Configure proxy using WebshareProxyConfig
+    proxy_config = WebshareProxyConfig(
+        host="p.webshare.io",
+        port=80,
+        username=proxy_username,
+        password=proxy_password
+    )
     
     # Create and configure session
     session = create_session()
-    session.proxies = proxy_config
+    session.headers.update(get_headers())
     session.cookies = cookie_jar
     
-    # Configure YouTubeTranscriptApi with session
+    # Configure YouTubeTranscriptApi with proxy config
     YouTubeTranscriptApi.proxies = proxy_config
     YouTubeTranscriptApi.headers = session.headers
     YouTubeTranscriptApi.cookies = session.cookies
